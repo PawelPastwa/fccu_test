@@ -12,7 +12,7 @@
 	aliases {
 		i2c-0 = &i2c0;
 		watchdog0 = &wdt0;
-		uart-0 = &uart0;
+	//	uart-0 = &uart0;
 		can = &twai;
 		fan-pin = &fan0;
 		fan-pwm = &fan_pwm0;

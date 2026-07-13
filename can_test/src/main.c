@@ -1,36 +1,65 @@
 #include <zephyr/kernel.h>
-#include <zephyr/logging/log.h>
+#include <zephyr/device.h>
+#include <zephyr/drivers/can.h>
+#include "can_definitions.h"
 
-/* Nasze własne, profesjonalnie wyizolowane moduły */
-#include "system_status.h"
-#include "can_interface.h"
+// 1. Definicja zabezpieczenia (Saturacja)
+#define CLAMP(value, min, max) (((value) > (max)) ? (max) : (((value) < (min)) ? (min) : (value)))
 
-LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
-
-
-// DO TESTU NA ESP32S3 SUPER MINI ZGODNIE Z DTSI TRZEBA POLACZYC KABLEM GPIO 4 i 5
+// 2. Pobranie urządzenia CAN z Device Tree (DTS) Zephyra
+const struct device *can_dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_canbus));
 
 int main(void) {
-    // Zatrzymujemy procesor na 4 sekundy.
-    k_msleep(4000);
-
-    LOG_INF("=== Uruchamianie komputera pokładowego VCU (ESP32-S3) ===");
-
-    init_system_status();
-    init_can_system();
-
-    uint8_t test_payload[4] = {0xDE, 0xAD, 0xBE, 0xEF};
-    LOG_INF("Wysylam testowa ramke CAN...");
-    can_transmit_message(0x123, test_payload, 4);
-
-    /* nadajemy stały sygnał */
-    while (1) {
-        LOG_INF("System zyje... wystrzeliwuje ramke do sieci CAN.");
-        can_transmit_message(0x123, test_payload, 4);
-
-        // Czekamy sekundę przed kolejnym strzałem
-        k_msleep(1000);
+    // Sprawdzenie, czy sprzęt CAN zainicjował się poprawnie
+    if (!device_is_ready(can_dev)) {
+        printk("Blad krytyczny: Urzadzenie CAN nie jest gotowe!\n");
+        return 0;
     }
 
+    // Uruchomienie sterownika CAN (wymagane w nowszych wersjach Zephyra)
+    can_set_mode(can_dev, CAN_MODE_LOOPBACK);
+    can_start(can_dev);
+    k_sleep(K_MSEC(1000));
+    printk("FCCU CAN wystartowal poprawnie.\n");
+
+    while (1) {
+        // 3. Pobranie danych (Symulujemy, że ADC odczytało równe 10V i -5A)
+        float raw_voltage = 10.0f;
+        float raw_current = -5.0f;
+
+        // 4. CLAMPING - Zabezpieczenie przed uderzeniem szumu poza zakres DBC
+        float safe_voltage = CLAMP(raw_voltage, -50.0f, 50.0f);
+        float safe_current = CLAMP(raw_current, -20.0f, 20.0f);
+
+        // 5. Wypełnienie struktury wygenerowanej przez cantools
+        struct hydrogreen_can_definitions_fccu_power_t power_data;
+        power_data.fc_voltage = safe_voltage;
+        power_data.fc_current = safe_current;
+        power_data.dcdc_voltage = 0.0f;
+        power_data.dcdc_current = 0.0f;
+        power_data.load_current = 0.0f;
+
+        // 6. Magia cantools - pakowanie struktury w 8-bajtową tablicę (bez użycia procesora!)
+        uint8_t payload[8];
+        hydrogreen_can_definitions_fccu_power_pack(payload, &power_data, 8);
+
+        // 7. Przygotowanie ramki API Zephyra (Standardowa ramka 11-bitowa)
+        struct can_frame frame = {
+                .id = 0x201, // Nasze wyliczone ID 513
+                .dlc = 8,
+        };
+        memcpy(frame.data, payload, 8);
+
+        // 8. Wysłanie ramki na fizyczny kabel (timeout 100ms)
+        int ret = can_send(can_dev, &frame, K_MSEC(100), NULL, NULL);
+        if (ret != 0) {
+            printk("Blad wysylki na magistrale: %d\n", ret);
+        } else {
+            printk("FCCU_POWER wyslane pomyslnie!\n");
+        }
+
+        // Pętla wykonuje się co 100 milisekund (Wysyłka z częstotliwością 10 Hz)
+        k_sleep(K_MSEC(100));
+    }
     return 0;
 }
